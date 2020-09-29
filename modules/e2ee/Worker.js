@@ -72,16 +72,11 @@ const digestLength = {
 
 /**
  * Derives a set of keys from the master key.
- * @param {Uint8Array} keyBytes - Value to derive key from
- * @param {Uint8Array} salt - Salt used in key derivation
+ * @param {CryptoKey} material - Bytes to derive key from
  *
  * See https://tools.ietf.org/html/draft-omara-sframe-00#section-4.3.1
  */
-async function deriveKeys(keyBytes) {
-    // https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/importKey
-    const material = await crypto.subtle.importKey('raw', keyBytes,
-        'HKDF', false, [ 'deriveBits', 'deriveKey' ]);
-
+async function deriveKeys(material) {
     const info = new ArrayBuffer();
     const textEncoder = new TextEncoder();
 
@@ -113,10 +108,28 @@ async function deriveKeys(keyBytes) {
     }, material, 128);
 
     return {
+        material,
         encryptionKey,
         authenticationKey,
         saltKey
     };
+}
+
+/**
+ * Ratchets a key. See
+ * https://tools.ietf.org/html/draft-omara-sframe-00#section-4.3.5.1
+ * @param {CryptoKey} material - base key material
+ * @returns {CrpytoKey} - ratcheted key material
+ */
+async function ratchet(material) {
+    const textEncoder = new TextEncoder();
+
+    return crypto.subtle.deriveBits({
+        name: 'HKDF',
+        salt: textEncoder.encode('JFrameRatchetKey'),
+        hash: 'SHA-256',
+        info: new ArrayBuffer()
+    }, material, 256);
 }
 
 
@@ -149,14 +162,28 @@ class Context {
      * @param {CryptoKey} key
      * @param {Number} keyIndex
      */
-    async setKey(key, keyIndex) {
+    async setKey(keyBytes, keyIndex) {
         this._currentKeyIndex = keyIndex % this._cryptoKeyRing.length;
-        if (key) {
-            this._cryptoKeyRing[this._currentKeyIndex] = await deriveKeys(key);
+        if (keyBytes) {
+            // https://developer.mozilla.org/en-US/docs/Web/API/SubtleCrypto/importKey
+            const material = await crypto.subtle.importKey('raw', keyBytes,
+                'HKDF', false, [ 'deriveBits', 'deriveKey' ]);
+
+            this._cryptoKeyRing[this._currentKeyIndex] = await deriveKeys(material);
         } else {
             this._cryptoKeyRing[this._currentKeyIndex] = false;
         }
         this._sendCount = 0n; // Reset the send count (bigint).
+    }
+
+    /**
+     * Ratchets a key forward one step.
+     */
+    async ratchet() {
+        const keys = this._cryptoKeyRing[this._currentKeyIndex];
+        const material = await ratchet(keys.material);
+
+        this.setKey(material, this._currentKeyIndex);
     }
 
     /**
@@ -418,6 +445,19 @@ onmessage = async event => {
         } else {
             context.setKey(false, keyIndex);
         }
+    } else if (operation === 'ratchet') {
+        const { participantId } = event.data;
+
+        // TODO: can we ensure this is for our own sender key?
+
+        if (!contexts.has(participantId)) {
+            console.error('Could not find context for', participantId);
+
+            return;
+        }
+        const context = contexts.get(participantId);
+
+        context.ratchet();
     } else if (operation === 'cleanup') {
         const { participantId } = event.data;
 

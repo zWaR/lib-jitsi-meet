@@ -148,4 +148,15 @@ export default class E2EEcontext {
             keyIndex
         });
     }
+
+    /**
+     * Ratchet our own key.
+     * @param {string} participantId - the ID of the participant who's key we are setting.
+     */
+    ratchet(participantId) {
+        this._worker.postMessage({
+            operation: 'ratchet',
+            participantId
+        });
+    }
 }
